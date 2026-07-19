@@ -5,6 +5,7 @@
 # ============================================================
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference    = "SilentlyContinue"   # biggest speed win: PS 5.1 progress bar cripples IWR/Expand-Archive
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # ── Config ──
@@ -43,6 +44,48 @@ function Test-WebView2Installed {
     return $false
 }
 
+# ── Fast download helper (native curl.exe: fast, resumable, retries; IWR fallback) ──
+function Get-CurlExe {
+    # The REAL curl.exe (not PowerShell's `curl` alias for Invoke-WebRequest).
+    $c = Join-Path $env:SystemRoot "System32\curl.exe"
+    if (Test-Path $c) { return $c }
+    $cmd = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Download-File {
+    param($Url, $OutFile, $Label)
+
+    # Start clean so curl's resume + our size check are deterministic.
+    if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+
+    $curl = Get-CurlExe
+    if ($curl) {
+        # Native curl: C-based, streams at line speed, own progress bar, hard caps
+        # so it can never hang a client (connect 30s, total 20min, auto-retry x3).
+        & $curl -L --fail --retry 3 --retry-delay 2 `
+                --connect-timeout 30 --max-time 1200 `
+                --progress-bar -o $OutFile $Url
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) {
+            $mb = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+            Write-OK "$Label downloaded ($mb MB)"
+            return
+        }
+        Write-Skip "curl path failed (exit $LASTEXITCODE) - trying built-in downloader"
+        if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Fallback: Invoke-WebRequest with progress OFF (so it stays fast) + timeout.
+    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 1200
+    if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) {
+        $mb = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+        Write-OK "$Label downloaded ($mb MB)"
+        return
+    }
+    throw "downloaded file is empty"
+}
+
 # ── Admin Check ──
 if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -69,21 +112,13 @@ if (Test-Path $InstallDir) {
     Write-OK "Created $InstallDir"
 }
 
-# ── Step 2: Download Grably with progress ──
+# ── Step 2: Download Grably (native curl - fast, resumable) ──
 Write-Step "Downloading Grably..."
 try {
-    $ProgressPreference = 'Continue'
-    Invoke-WebRequest -Uri $DownloadURL -OutFile $ZipFile -UseBasicParsing -Verbose
-    Write-OK "Downloaded successfully"
+    Download-File -Url $DownloadURL -OutFile $ZipFile -Label "Grably"
 } catch {
-    # Fallback: curl with progress
-    try {
-        curl.exe -L --fail --progress-bar -o $ZipFile $DownloadURL 2>$null
-        Write-OK "Downloaded via curl"
-    } catch {
-        Write-Err "Download failed: $_"
-        pause; exit 1
-    }
+    Write-Err "Download failed: $_"
+    pause; exit 1
 }
 
 # ── Step 3: Extract ──
@@ -108,7 +143,9 @@ if (Test-Path $exePath) {
         $Shortcut = $WshShell.CreateShortcut($DesktopLink)
         $Shortcut.TargetPath = $exePath
         $Shortcut.WorkingDirectory = $InstallDir
-        $Shortcut.IconLocation = "$InstallDir\icons\icon.ico"
+        # Point the icon at the EXE itself (golden icon is embedded in it) so the
+        # shortcut always has the right icon even though the zip ships no icons\ folder.
+        $Shortcut.IconLocation = "$exePath,0"
         $Shortcut.Description = "Grably - Advanced Video Downloader"
         $Shortcut.Save()
         Write-OK "Desktop shortcut created"
@@ -117,7 +154,7 @@ if (Test-Path $exePath) {
         $Shortcut2 = $WshShell.CreateShortcut($StartMenuLink)
         $Shortcut2.TargetPath = $exePath
         $Shortcut2.WorkingDirectory = $InstallDir
-        $Shortcut2.IconLocation = "$InstallDir\icons\icon.ico"
+        $Shortcut2.IconLocation = "$exePath,0"
         $Shortcut2.Description = "Grably - Advanced Video Downloader"
         $Shortcut2.Save()
         Write-OK "Start Menu shortcut created"
