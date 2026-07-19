@@ -99,7 +99,7 @@ if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 Clear-Host
 Write-Host ""
 Write-Host "  ==========================================" -ForegroundColor Magenta
-Write-Host "       Grably - Video Downloader Installer" -ForegroundColor White
+Write-Host "       Grably v2- Video Downloader Installer" -ForegroundColor White
 Write-Host "  ==========================================" -ForegroundColor Magenta
 Write-Host ""
 
